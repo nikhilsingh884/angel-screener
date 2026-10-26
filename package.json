@@ -1,0 +1,5 @@
+{
+  "name": "angel-screener",
+  "version": "1.0.0",
+  "dependencies": { "otplib": "^12.0.1" }
+}

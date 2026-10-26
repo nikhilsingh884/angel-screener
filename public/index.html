@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Screener</title>
+<style>
+:root{--bg:#000;--card:#111;--line:#2a2a2a;--fg:#fff;--mut:#8a8a8a;--acc:#b6f23a;--up:#2fd16b;--dn:#ff5a5a}
+*{box-sizing:border-box}
+body{margin:0 auto;max-width:960px;padding:14px;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,sans-serif;font-variant-numeric:tabular-nums}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+h1{font-size:19px;margin:0}
+#mode{display:flex;align-items:center;gap:6px;color:var(--mut);font-size:12px}
+#mode i{width:8px;height:8px;border-radius:50%;background:var(--mut)}
+#mode.on i{background:var(--acc)}
+h2{font-size:13px;color:var(--mut);font-weight:500;margin:14px 0 6px}
+button,select,input{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:7px 9px;font:inherit}
+button{cursor:pointer}button:hover{border-color:var(--fg)}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+#chips{display:flex;gap:6px;flex-wrap:wrap}
+.rule{display:flex;gap:6px;margin:6px 0;flex-wrap:wrap}
+.rule select{flex:1 1 170px}.rule input{width:90px}
+.wrap{overflow-x:auto;margin-top:14px;border-top:1px solid var(--line)}
+table{width:100%;border-collapse:collapse}
+th,td{padding:9px 8px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--mut);font-weight:500;cursor:pointer;user-select:none}
+td:first-child{font-weight:600}
+.up{color:var(--up)}.dn{color:var(--dn)}
+#empty{color:var(--mut);padding:18px 0;text-align:center}
+.bar{display:flex;gap:12px;align-items:center;margin:6px 0;flex-wrap:wrap}
+#mdmStatus{color:var(--mut);font-size:12px}
+#mdmEmpty{color:var(--mut);padding:14px 0;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <h1>Live Screener</h1>
+  <div id="mode"><i></i><span id="modeText">Connecting</span></div>
+</header>
+
+<h2>MDM setups formed today</h2>
+<div class="bar">
+  <select id="tf" aria-label="Timeframe" onchange="scanMDM()">
+    <option value="FIVE_MINUTE">5 min</option>
+    <option value="FIFTEEN_MINUTE" selected>15 min</option>
+    <option value="THIRTY_MINUTE">30 min</option>
+    <option value="ONE_HOUR">1 hour</option>
+    <option value="ONE_DAY">Daily</option>
+  </select>
+  <span id="mdmStatus">Waiting for prices…</span>
+</div>
+<div class="wrap" style="margin-top:6px">
+  <table>
+    <thead><tr><th>Stock</th><th>Side</th><th>Completed</th><th>Range high</th><th>Range low</th><th>Dojis</th></tr></thead>
+    <tbody id="mdmBody"></tbody>
+  </table>
+  <div id="mdmEmpty" hidden>No MDM setups formed today on this timeframe.</div>
+</div>
+
+<h2>Ready-made screeners</h2>
+<div id="chips"></div>
+
+<h2>Your rules (all must match)</h2>
+<div id="rules"></div>
+<button onclick="addRule()">Add rule</button>
+
+<div class="wrap">
+  <table>
+    <thead><tr id="head"></tr></thead>
+    <tbody id="body"></tbody>
+  </table>
+  <div id="empty" hidden>No stocks match these rules right now.</div>
+</div>
+
+<script>
+const FIELDS = {
+  pct: '% change today', ltp: 'Price (₹)', gap: 'Gap % (open vs prev close)',
+  off52H: '% below 52-week high', offHigh: '% below day high',
+  offLow: '% above day low', buyRatio: 'Buy / sell quantity ratio', volume: 'Volume'
+};
+const COLS = [['symbol','Stock'],['ltp','Price'],['pct','Chg %'],['gap','Gap %'],['off52H','Off 52W high %'],['buyRatio','Buy/Sell'],['volume','Volume']];
+const PRESETS = {
+  'Top gainers': [{f:'pct',o:'>',v:1}],
+  'Top losers': [{f:'pct',o:'<',v:-1}],
+  'Near 52-week high': [{f:'off52H',o:'<',v:3}],
+  'Day-high breakout': [{f:'offHigh',o:'<',v:0.2},{f:'pct',o:'>',v:0.5}],
+  'Gap up': [{f:'gap',o:'>',v:1}],
+  'Buyers dominate': [{f:'buyRatio',o:'>',v:1.5}]
+};
+let data = [], prev = {}, sort = {k:'pct', d:-1};
+let rules = [];
+try { rules = JSON.parse(localStorage.getItem('rules') || '[]'); } catch (e) {}
+
+const derive = q => ({...q,
+  gap: (q.open - q.close) / q.close * 100,
+  off52H: (q.wkHigh - q.ltp) / q.wkHigh * 100,
+  offHigh: (q.high - q.ltp) / q.high * 100,
+  offLow: (q.ltp - q.low) / q.low * 100,
+  buyRatio: q.sell ? q.buy / q.sell : 0
+});
+const test = {'>': (a,b) => a > b, '<': (a,b) => a < b};
+const fmt = (k, v) => k === 'symbol' ? v : k === 'volume' ? Math.round(v).toLocaleString('en-IN')
+  : k === 'ltp' ? '₹' + v.toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2}) : v.toFixed(2);
+
+function save() {
+  try { localStorage.setItem('rules', JSON.stringify(rules)); } catch (e) {}
+  draw();
+}
+function preset(n) { rules = JSON.parse(JSON.stringify(PRESETS[n])); drawRules(); save(); }
+function addRule() { rules.push({f:'pct', o:'>', v:0}); drawRules(); save(); }
+function delRule(i) { rules.splice(i, 1); drawRules(); save(); }
+
+function drawRules() {
+  document.getElementById('rules').innerHTML = rules.map((r, i) => `
+    <div class="rule">
+      <select aria-label="Field" onchange="rules[${i}].f=this.value;save()">
+        ${Object.entries(FIELDS).map(([k, l]) => `<option value="${k}" ${k === r.f ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+      <select aria-label="Condition" onchange="rules[${i}].o=this.value;save()">
+        <option value=">" ${r.o === '>' ? 'selected' : ''}>is above</option>
+        <option value="<" ${r.o === '<' ? 'selected' : ''}>is below</option>
+      </select>
+      <input type="number" step="any" aria-label="Value" value="${r.v}" oninput="rules[${i}].v=parseFloat(this.value)||0;save()">
+      <button onclick="delRule(${i})" aria-label="Remove rule">Remove</button>
+    </div>`).join('');
+}
+
+function draw() {
+  document.getElementById('head').innerHTML = COLS.map(([k, l]) =>
+    `<th onclick="sort={k:'${k}',d:sort.k==='${k}'?-sort.d:-1};draw()">${l}${sort.k === k ? (sort.d < 0 ? ' ↓' : ' ↑') : ''}</th>`).join('');
+  const rows = data
+    .filter(q => rules.every(r => test[r.o](q[r.f], r.v)))
+    .sort((a, b) => sort.k === 'symbol' ? sort.d * a.symbol.localeCompare(b.symbol) : sort.d * (a[sort.k] - b[sort.k]));
+  document.getElementById('empty').hidden = rows.length > 0;
+  document.getElementById('body').innerHTML = rows.map(q => {
+    const tick = prev[q.symbol] === undefined ? '' : q.ltp > prev[q.symbol] ? 'up' : q.ltp < prev[q.symbol] ? 'dn' : '';
+    return `<tr>${COLS.map(([k]) => {
+      const c = k === 'ltp' ? tick : k === 'pct' || k === 'gap' ? (q[k] >= 0 ? 'up' : 'dn') : '';
+      return `<td class="${c}">${fmt(k, q[k])}</td>`;
+    }).join('')}</tr>`;
+  }).join('');
+}
+
+async function poll() {
+  const mode = document.getElementById('mode'), txt = document.getElementById('modeText');
+  try {
+    const j = await (await fetch('/api/quotes')).json();
+    if (!j.quotes) throw new Error(j.error);
+    prev = Object.fromEntries(data.map(q => [q.symbol, q.ltp]));
+    data = j.quotes.map(derive);
+    mode.className = 'on';
+    txt.textContent = (j.live ? 'Live' : 'Demo data') + ' · ' + new Date(j.time).toLocaleTimeString('en-IN');
+    draw();
+    startMDM();
+  } catch (e) {
+    mode.className = '';
+    txt.textContent = 'Disconnected, retrying';
+  }
+}
+
+// ── MDM setups (port of the MDM&swing-Nikhil Pine indicator) ──
+const TF = {
+  FIVE_MINUTE: {m: 5, intra: true}, FIFTEEN_MINUTE: {m: 15, intra: true},
+  THIRTY_MINUTE: {m: 30, intra: true}, ONE_HOUR: {m: 60, intra: true},
+  ONE_DAY: {m: 930, intra: false} // daily candle runs 00:00 to 15:30 IST
+};
+// same defaults as the Pine inputs
+const P = {body: .70, wick: .35, strongWick: .50, minDojis: 1, maxDojis: 5, small: .50,
+  avgLen: 20, smallVsAnchor: .50, sameDay: true, secondMin: .75, ignoreFirst: true};
+
+// MDM-START
+function detectMDM(c, intra, below30) {
+  const rng = [], body = [], big = [], bull = [], bear = [], mid = [], found = [];
+  let anchor = null, midTemp = 0, hasStrong = false;
+  for (let i = 0; i < c.length; i++) {
+    const k = c[i], r = k.h - k.l, b = Math.abs(k.c - k.o);
+    rng[i] = r; body[i] = b; bull[i] = k.c > k.o; bear[i] = k.c < k.o;
+    const first = intra && i > 0 && k.d !== c[i - 1].d;
+    const skip = P.ignoreFirst && first;
+    const mom = r > 0 && b / r >= P.body && !skip;
+    const dojiRaw = r > 0 && (r - b) / r >= P.wick && !skip;
+    let avg = null;
+    if (i >= P.avgLen - 1) { let t = 0; for (let j = i - P.avgLen + 1; j <= i; j++) t += rng[j]; avg = t / P.avgLen; }
+    const small = r > 0 && avg !== null && r <= P.small * avg;
+    const bigM = mom && !small, smallM = mom && small;
+    const smallVsAnchor = anchor !== null && midTemp > 0 && b <= P.smallVsAnchor * anchor && !skip;
+    const doji = dojiRaw || smallVsAnchor;
+    mid[i] = (doji || smallM) ? (i > 0 ? mid[i - 1] : 0) + 1 : 0;
+    midTemp = i > 0 ? mid[i - 1] : 0; // same as the Pine script (reads two bars back on the next candle)
+    big[i] = bigM;
+    if (bigM) anchor = b;
+    const strongDoji = doji && (r > 0 ? (r - b) / r : 0) >= P.strongWick;
+    const prevHas = hasStrong;
+    if (bigM) hasStrong = false;
+    if (strongDoji) hasStrong = true;
+
+    const count = i > 0 ? mid[i - 1] : 0, f = i - count - 1;
+    if (bigM && count >= P.minDojis && count <= P.maxDojis && count <= 10 && f >= 0 && big[f]
+        && ((bull[i] && bull[f]) || (bear[i] && bear[f]))
+        && (!P.sameDay || !intra || c[f].d === k.d)
+        && b >= P.secondMin * body[f] && prevHas
+        && (below30 || bull[i])) {
+      found.push({i, f, count, bullish: bull[i], hi: Math.max(c[f].h, k.h), lo: Math.min(c[f].l, k.l)});
+    }
+  }
+  return found;
+}
+// MDM-END
+
+let scanning = false, mdmOn = false;
+function startMDM() { if (mdmOn) return; mdmOn = true; scanMDM(); setInterval(scanMDM, 60000); }
+
+async function scanMDM() {
+  if (scanning || !data.length) return;
+  scanning = true;
+  const st = document.getElementById('mdmStatus'), key = document.getElementById('tf').value, tf = TF[key];
+  const syms = data.map(q => q.symbol), rows = [];
+  const today = new Date(Date.now() + 19800000).toISOString().slice(0, 10); // today in IST
+  let failed = 0;
+  try {
+    for (let b = 0; b < syms.length; b += 4) {
+      st.textContent = `Scanning ${b}/${syms.length}…`;
+      const j = await (await fetch(`/api/candles?interval=${key}&symbols=${syms.slice(b, b + 4).join(',')}`)).json();
+      if (j.live === false) { st.textContent = 'MDM needs live Angel One data. Add your keys in Netlify.'; return; }
+      if (!j.candles) throw new Error(j.error);
+      failed += j.failed.length;
+      for (const [s, raw] of Object.entries(j.candles)) {
+        const c = raw
+          .map(r => ({t: r[0].replace(/([+-]\d\d)(\d\d)$/, '$1:$2'), d: r[0].slice(0, 10), o: r[1], h: r[2], l: r[3], c: r[4]}))
+          .filter(k => new Date(k.t).getTime() + tf.m * 60000 <= Date.now()); // completed candles only
+        for (const f of detectMDM(c, tf.intra, tf.intra && tf.m < 30)) {
+          const k = c[f.i];
+          if (k.d === today) rows.push({s, bull: f.bullish, time: tf.intra ? k.t.slice(11, 16) : k.d, hi: f.hi, lo: f.lo, n: f.count});
+        }
+      }
+    }
+    rows.sort((a, b) => b.time.localeCompare(a.time));
+    document.getElementById('mdmBody').innerHTML = rows.map(r =>
+      `<tr><td>${r.s}</td><td class="${r.bull ? 'up' : 'dn'}">${r.bull ? 'Bullish' : 'Bearish'}</td><td>${r.time}</td><td>${r.hi.toFixed(2)}</td><td>${r.lo.toFixed(2)}</td><td>${r.n}</td></tr>`).join('');
+    document.getElementById('mdmEmpty').hidden = rows.length > 0;
+    st.textContent = `${rows.length} setup(s) · updated ${new Date().toLocaleTimeString('en-IN')}` + (failed ? ` · ${failed} stock(s) skipped, retrying next scan` : '');
+  } catch (e) {
+    st.textContent = 'MDM scan failed, retrying';
+  } finally {
+    scanning = false;
+  }
+}
+
+(function () {
+  document.getElementById('chips').innerHTML = Object.keys(PRESETS).map(n => `<button onclick="preset('${n}')">${n}</button>`).join('')
+    + '<button onclick="rules=[];drawRules();save()">Show all</button>';
+  drawRules(); draw(); poll(); setInterval(poll, 10000);
+})();
+</script>
+</body>
+</html>

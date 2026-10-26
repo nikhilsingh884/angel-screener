@@ -1,0 +1,15 @@
+[build]
+  publish = "public"
+
+[functions]
+  directory = "netlify/functions"
+
+[[redirects]]
+  from = "/api/quotes"
+  to = "/.netlify/functions/quotes"
+  status = 200
+
+[[redirects]]
+  from = "/api/candles"
+  to = "/.netlify/functions/candles"
+  status = 200
